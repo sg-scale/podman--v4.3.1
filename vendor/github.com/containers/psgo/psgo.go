@@ -29,7 +29,6 @@ package psgo
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"runtime"
 	"sort"
@@ -41,7 +40,7 @@ import (
 	"github.com/containers/psgo/internal/dev"
 	"github.com/containers/psgo/internal/proc"
 	"github.com/containers/psgo/internal/process"
-	"github.com/containers/storage/pkg/idtools"
+	"go.podman.io/storage/pkg/idtools"
 	"golang.org/x/sys/unix"
 )
 
@@ -110,7 +109,7 @@ func findID(idStr string, mapping []idtools.IDMap, lookupFunc func(uid string) (
 	}
 
 	// User not found, read the overflow
-	overflow, err := ioutil.ReadFile(overflowFile)
+	overflow, err := os.ReadFile(overflowFile)
 	if err != nil {
 		return "", err
 	}
@@ -180,6 +179,11 @@ var (
 			normal: "user",
 			header: "USER",
 			procFn: processUSER,
+		},
+		{
+			normal: "uid",
+			header: "UID",
+			procFn: processUID,
 		},
 		{
 			code:   "%a",
@@ -293,6 +297,12 @@ var (
 			header: "HUSER",
 			onHost: true,
 			procFn: processHUSER,
+		},
+		{
+			normal: "huid",
+			header: "HUID",
+			onHost: true,
+			procFn: processHUID,
 		},
 		{
 			normal: "hgroup",
@@ -415,7 +425,7 @@ func JoinNamespaceAndProcessInfoWithOptions(pid string, descriptors []string, op
 			dataErr = err
 			return
 		}
-		defer fd.Close()
+		defer fd.Close() //nolint:errcheck
 
 		// create a new mountns on the current thread
 		if err = unix.Unshare(unix.CLONE_NEWNS); err != nil {
@@ -466,7 +476,7 @@ func JoinNamespaceAndProcessInfoByPidsWithOptions(pids []string, descriptors []s
 	for _, pid := range pids {
 		ns, err := proc.ParsePIDNamespace(pid)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
 				// catch race conditions
 				continue
 			}
@@ -481,7 +491,7 @@ func JoinNamespaceAndProcessInfoByPidsWithOptions(pids []string, descriptors []s
 	data := [][]string{}
 	for i, pid := range pidList {
 		pidData, err := JoinNamespaceAndProcessInfoWithOptions(pid, descriptors, options)
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
 			// catch race conditions
 			continue
 		}
@@ -646,6 +656,11 @@ func processPPID(p *process.Process, ctx *psContext) (string, error) {
 // otherwise.
 func processUSER(p *process.Process, ctx *psContext) (string, error) {
 	return process.LookupUID(p.Status.Uids[1])
+}
+
+// processUID returns the effective UID of the process as the decimal representation.
+func processUID(p *process.Process, ctx *psContext) (string, error) {
+	return p.Status.Uids[1], nil
 }
 
 // processRUSER returns the effective user name of the process.  This will be
@@ -853,6 +868,23 @@ func processHUSER(p *process.Process, ctx *psContext) (string, error) {
 			return findID(hp.Status.Uids[1], ctx.opts.UIDMap, process.LookupUID, "/proc/sys/fs/overflowuid")
 		}
 		return hp.Huser, nil
+	}
+	return "?", nil
+}
+
+// processHUID returns the effective UID of the corresponding host process
+// of the (container) as the decimal representation or "?" if no corresponding
+// process could be found.
+func processHUID(p *process.Process, ctx *psContext) (string, error) {
+	if hp := findHostProcess(p, ctx); hp != nil {
+		if ctx.opts != nil && len(ctx.opts.UIDMap) > 0 {
+			// Return uid without searching its textual representation.
+			lookupFunc := func(uid string) (string, error) {
+				return uid, nil
+			}
+			return findID(hp.Status.Uids[1], ctx.opts.UIDMap, lookupFunc, "/proc/sys/fs/overflowuid")
+		}
+		return hp.Status.Uids[1], nil
 	}
 	return "?", nil
 }
